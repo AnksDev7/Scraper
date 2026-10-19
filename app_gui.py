@@ -8,6 +8,9 @@ import requests
 import streamlit as st
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from yt_dlp.utils import DownloadError
+
+from Yt_Comment_Scrape import COMMENT_FIELDS, scrape_video_comments
 
 
 MAX_SCAN_LIMIT = 5000
@@ -177,6 +180,14 @@ def make_csv(rows):
     return output.getvalue().encode("utf-8-sig")
 
 
+def make_comments_csv(rows):
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=COMMENT_FIELDS)
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue().encode("utf-8-sig")
+
+
 def make_thumbnail_zip(rows):
     output = io.BytesIO()
     downloaded = 0
@@ -216,139 +227,191 @@ def safe_filename(value):
     return filename or "channel"
 
 
-st.set_page_config(page_title="YouTube Channel Scraper", page_icon="▶️")
-st.title("YouTube Channel Scraper")
-st.write(
-    "Enter your own YouTube Data API key below, or configure YT_API_KEY "
-    "in the server terminal. A key entered below takes priority. Keys are "
-    "used for the scrape and are not saved by the app."
+st.set_page_config(page_title="YouTube Scraper", page_icon="▶️")
+st.title("YouTube Scraper")
+scrape_mode = st.radio(
+    "What would you like to scrape?",
+    ["Channel videos", "Video comments"],
+    horizontal=True,
 )
 
-with st.form("scrape_form", clear_on_submit=True):
-    api_key = st.text_input(
-        "YouTube Data API key", type="password",
-        help=(
-            "Use a key with YouTube Data API v3 enabled. Leave blank to use "
-            "the server's YT_API_KEY, if configured."
-        ),
+if scrape_mode == "Channel videos":
+    st.write(
+        "Enter your own YouTube Data API key below, or configure YT_API_KEY "
+        "in the server terminal. A key entered below takes priority. Keys "
+        "are used for the scrape and are not saved by the app."
     )
-    channel = st.text_input("Channel URL, @handle, username, or channel ID")
-    col1, col2 = st.columns(2)
-    with col1:
-        result_count = st.number_input(
-            "Number of videos to return", min_value=1, max_value=5000,
-            value=20, step=1,
-        )
-    with col2:
-        scan_limit = st.number_input(
-            "Maximum recent uploads to scan", min_value=1,
-            max_value=MAX_SCAN_LIMIT, value=500, step=50,
+    with st.form("channel_scrape_form", clear_on_submit=True):
+        api_key = st.text_input(
+            "YouTube Data API key", type="password",
             help=(
-                "Sorting applies to this many uploads. Increase this to "
-                "include older videos when sorting by views or oldest first."
+                "Use a key with YouTube Data API v3 enabled. Leave blank to "
+                "use the server's YT_API_KEY, if configured."
             ),
         )
-    sort_order = st.selectbox(
-        "Sort videos by",
-        ["Most views", "Newest first", "Oldest first"],
-    )
-    include_thumbnails = st.checkbox("Prepare thumbnails for download")
-    submitted = st.form_submit_button("Fetch videos")
-
-if submitted:
-    for key in (
-        "scrape_videos",
-        "scrape_channel_title",
-        "scrape_include_thumbnails",
-        "scrape_thumbnail_data",
-        "scrape_thumbnail_count",
-        "scrape_thumbnail_failures",
-    ):
-        st.session_state.pop(key, None)
-
-    effective_api_key = api_key.strip() or os.environ.get("YT_API_KEY", "").strip()
-    if not effective_api_key:
-        st.error(
-            "Enter your YouTube Data API key, or configure YT_API_KEY "
-            "in the server environment."
-        )
-    elif not channel.strip():
-        st.error("Enter a YouTube channel URL, @handle, username, or ID.")
-    else:
-        try:
-            youtube = build(
-                "youtube", "v3", developerKey=effective_api_key,
-                cache_discovery=False,
+        channel = st.text_input("Channel URL, @handle, username, or channel ID")
+        col1, col2 = st.columns(2)
+        with col1:
+            result_count = st.number_input(
+                "Number of videos to return", min_value=1, max_value=5000,
+                value=20, step=1,
             )
-            with st.spinner("Fetching channel videos..."):
-                videos, channel_title = get_channel_videos(
-                    youtube, channel.strip(), int(result_count),
-                    int(scan_limit), sort_order,
-                )
-            st.session_state["scrape_videos"] = videos
-            st.session_state["scrape_channel_title"] = channel_title
-            st.session_state["scrape_include_thumbnails"] = include_thumbnails
-            if include_thumbnails:
-                with st.spinner("Preparing thumbnail download..."):
-                    thumbnail_data, thumbnail_count, thumbnail_failures = (
-                        make_thumbnail_zip(videos)
-                    )
-                st.session_state["scrape_thumbnail_data"] = thumbnail_data
-                st.session_state["scrape_thumbnail_count"] = thumbnail_count
-                st.session_state["scrape_thumbnail_failures"] = len(
-                    thumbnail_failures
-                )
-            else:
-                st.session_state.pop("scrape_thumbnail_data", None)
-                st.session_state.pop("scrape_thumbnail_count", None)
-                st.session_state.pop("scrape_thumbnail_failures", None)
-            st.success(f"Found {len(videos)} videos for {channel_title}.")
-        except ValueError as exc:
-            st.error(f"Could not fetch videos: {exc}")
-        except HttpError as exc:
+        with col2:
+            scan_limit = st.number_input(
+                "Maximum recent uploads to scan", min_value=1,
+                max_value=MAX_SCAN_LIMIT, value=500, step=50,
+                help=(
+                    "Sorting applies to this many uploads. Increase this to "
+                    "include older videos when sorting by views or oldest first."
+                ),
+            )
+        sort_order = st.selectbox(
+            "Sort videos by",
+            ["Most views", "Newest first", "Oldest first"],
+        )
+        include_thumbnails = st.checkbox("Prepare thumbnails for download")
+        submitted = st.form_submit_button("Fetch videos")
+
+    if submitted:
+        for key in (
+            "scrape_videos",
+            "scrape_channel_title",
+            "scrape_include_thumbnails",
+            "scrape_thumbnail_data",
+            "scrape_thumbnail_count",
+            "scrape_thumbnail_failures",
+            "scrape_comments",
+            "scrape_comment_reported_count",
+        ):
+            st.session_state.pop(key, None)
+
+        effective_api_key = (
+            api_key.strip() or os.environ.get("YT_API_KEY", "").strip()
+        )
+        if not effective_api_key:
             st.error(
-                "The request failed. Check that the API key is valid, "
-                "YouTube Data API v3 is enabled, and quota is available. "
-                f"YouTube API returned HTTP {exc.status_code}: {exc.reason}"
+                "Enter your YouTube Data API key, or configure YT_API_KEY "
+                "in the server environment."
             )
-
-if st.session_state.get("scrape_videos"):
-    videos = st.session_state["scrape_videos"]
-    filename = safe_filename(st.session_state["scrape_channel_title"])
-    st.dataframe(
-        [
-            {
-                "Title": video.get("title"),
-                "Published": video.get("publish_time"),
-                "Views": video.get("view_count"),
-                "Video ID": video.get("video_id"),
-            }
-            for video in videos
-        ],
-        use_container_width=True,
-    )
-    st.download_button(
-        "Download CSV",
-        data=make_csv(videos),
-        file_name=f"{filename}_videos.csv",
-        mime="text/csv",
-    )
-    if st.session_state.get("scrape_include_thumbnails"):
-        thumbnail_data = st.session_state.get("scrape_thumbnail_data")
-        thumbnail_count = st.session_state.get("scrape_thumbnail_count", 0)
-        thumbnail_failures = st.session_state.get(
-            "scrape_thumbnail_failures", 0
-        )
-        if thumbnail_data:
-            st.download_button(
-                f"Download thumbnails ZIP ({thumbnail_count})",
-                data=thumbnail_data,
-                file_name=f"{filename}_thumbnails.zip",
-                mime="application/zip",
-            )
-            if thumbnail_failures:
-                st.warning(
-                    f"{thumbnail_failures} thumbnail(s) could not be downloaded."
-                )
+        elif not channel.strip():
+            st.error("Enter a YouTube channel URL, @handle, username, or ID.")
         else:
-            st.warning("No thumbnails could be downloaded.")
+            try:
+                youtube = build(
+                    "youtube", "v3", developerKey=effective_api_key,
+                    cache_discovery=False,
+                )
+                with st.spinner("Fetching channel videos..."):
+                    videos, channel_title = get_channel_videos(
+                        youtube, channel.strip(), int(result_count),
+                        int(scan_limit), sort_order,
+                    )
+                st.session_state["scrape_videos"] = videos
+                st.session_state["scrape_channel_title"] = channel_title
+                st.session_state["scrape_include_thumbnails"] = include_thumbnails
+                if include_thumbnails:
+                    with st.spinner("Preparing thumbnail download..."):
+                        (
+                            thumbnail_data,
+                            thumbnail_count,
+                            thumbnail_failures,
+                        ) = make_thumbnail_zip(videos)
+                    st.session_state["scrape_thumbnail_data"] = thumbnail_data
+                    st.session_state["scrape_thumbnail_count"] = thumbnail_count
+                    st.session_state["scrape_thumbnail_failures"] = len(
+                        thumbnail_failures
+                    )
+                else:
+                    st.session_state.pop("scrape_thumbnail_data", None)
+                    st.session_state.pop("scrape_thumbnail_count", None)
+                    st.session_state.pop("scrape_thumbnail_failures", None)
+                st.success(f"Found {len(videos)} videos for {channel_title}.")
+            except ValueError as exc:
+                st.error(f"Could not fetch videos: {exc}")
+            except HttpError as exc:
+                st.error(
+                    "The request failed. Check that the API key is valid, "
+                    "YouTube Data API v3 is enabled, and quota is available. "
+                    f"YouTube API returned HTTP {exc.status_code}: {exc.reason}"
+                )
+
+    if st.session_state.get("scrape_videos"):
+        videos = st.session_state["scrape_videos"]
+        filename = safe_filename(st.session_state["scrape_channel_title"])
+        st.dataframe(
+            [
+                {
+                    "Title": video.get("title"),
+                    "Published": video.get("publish_time"),
+                    "Views": video.get("view_count"),
+                    "Video ID": video.get("video_id"),
+                }
+                for video in videos
+            ],
+            use_container_width=True,
+        )
+        st.download_button(
+            "Download CSV",
+            data=make_csv(videos),
+            file_name=f"{filename}_videos.csv",
+            mime="text/csv",
+        )
+        if st.session_state.get("scrape_include_thumbnails"):
+            thumbnail_data = st.session_state.get("scrape_thumbnail_data")
+            thumbnail_count = st.session_state.get("scrape_thumbnail_count", 0)
+            thumbnail_failures = st.session_state.get(
+                "scrape_thumbnail_failures", 0
+            )
+            if thumbnail_data:
+                st.download_button(
+                    f"Download thumbnails ZIP ({thumbnail_count})",
+                    data=thumbnail_data,
+                    file_name=f"{filename}_thumbnails.zip",
+                    mime="application/zip",
+                )
+                if thumbnail_failures:
+                    st.warning(
+                        f"{thumbnail_failures} thumbnail(s) could not be downloaded."
+                    )
+            else:
+                st.warning("No thumbnails could be downloaded.")
+else:
+    st.write(
+        "Paste a YouTube video URL to fetch its comments. This mode does not "
+        "require a YouTube Data API key."
+    )
+    with st.form("comment_scrape_form", clear_on_submit=True):
+        video_url = st.text_input("YouTube video URL")
+        comment_submitted = st.form_submit_button("Fetch comments")
+
+    if comment_submitted:
+        st.session_state.pop("scrape_videos", None)
+        st.session_state.pop("scrape_comments", None)
+        if not video_url.strip():
+            st.error("Enter a YouTube video URL.")
+        else:
+            try:
+                with st.spinner("Fetching video comments..."):
+                    comments, reported_count = scrape_video_comments(video_url)
+                st.session_state["scrape_comments"] = comments
+                st.session_state["scrape_comment_reported_count"] = reported_count
+                st.success(
+                    f"Fetched {len(comments)} comments "
+                    f"(YouTube reported {reported_count})."
+                )
+            except (DownloadError, ValueError) as exc:
+                st.error(f"Could not fetch comments: {exc}")
+
+    if st.session_state.get("scrape_comments") is not None:
+        comments = st.session_state["scrape_comments"]
+        reported_count = st.session_state.get(
+            "scrape_comment_reported_count", 0
+        )
+        st.caption(f"Comments reported by YouTube: {reported_count}")
+        st.dataframe(comments, use_container_width=True)
+        st.download_button(
+            "Download comments CSV",
+            data=make_comments_csv(comments),
+            file_name="youtube_comments.csv",
+            mime="text/csv",
+        )
